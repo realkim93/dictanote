@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card'
 import { correctText, CorrectionResult } from '@/app/actions/correct'
 import { generateSummary, NotionMetadata } from '@/app/actions/summary'
 import { saveToNotion } from '@/app/actions/notion'
+import { suggestAlternatives } from '@/app/actions/suggest'
 import { CorrectionEditor } from '@/components/correction-editor'
 import { SummaryReview } from '@/components/summary-review'
 import { Mic, Square, Loader2, Sparkles, FileText, Globe } from 'lucide-react'
@@ -26,7 +27,56 @@ export function AudioRecorder() {
     const [notionMetadata, setNotionMetadata] = useState<NotionMetadata | null>(null)
     const [error, setError] = useState<string | null>(null)
 
+    // Real-time suggestion state
+    const [suggestions, setSuggestions] = useState<string[]>([])
+    const [lastSentence, setLastSentence] = useState<string | null>(null)
+
     const recognitionRef = useRef<any>(null)
+
+    // Trigger suggestion generation
+    const handleSuggestionTrigger = async (sentence: string) => {
+        if (!sentence || sentence.length < 2) return
+        setLastSentence(sentence)
+        setSuggestions([]) // Clear old
+
+        try {
+            const alts = await suggestAlternatives(sentence)
+            if (alts && alts.length > 0) {
+                setSuggestions(alts)
+            }
+        } catch (e) {
+            console.error('Suggestion error', e)
+        }
+    }
+
+    // Handle Keyboard shortcuts
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (mode !== 'recording' || suggestions.length === 0 || !lastSentence) return
+
+            if (['1', '2', '3'].includes(e.key)) {
+                e.preventDefault()
+                const index = parseInt(e.key) - 1
+                if (suggestions[index]) {
+                    const selected = suggestions[index]
+                    setTranscript(prev => {
+                        // Replace the last occurrence of the lastSentence
+                        // Verify it ends with it (approx)
+                        const trimmedPrev = prev.trim()
+                        if (trimmedPrev.endsWith(lastSentence)) {
+                            return trimmedPrev.slice(0, -lastSentence.length) + selected
+                        }
+                        return prev // Fallback if mismatch
+                    })
+                    setSuggestions([]) // Clear after selection
+                    setLastSentence(null)
+                }
+            }
+        }
+
+        window.addEventListener('keydown', handleKeyDown)
+        return () => window.removeEventListener('keydown', handleKeyDown)
+    }, [mode, suggestions, lastSentence])
 
     useEffect(() => {
         // Initialize SpeechRecognition on mount
@@ -44,26 +94,15 @@ export function AudioRecorder() {
         recognition.lang = 'ko-KR'
 
         recognition.onresult = (event: any) => {
-            let finalTranscript = ''
-            // Reconstruct the full transcript from the event results
-            // We can't just append because interim results change. 
-            // Strategy: Keep previous chunks? 
-            // Actually, standard behavior: event.results contains the session's results. 
-            // But if we restart, we lose it. 
-            // Let's append only finalized results and keep partials in separate state?
-            // Simpler: Just map all results to string.
-
-            let interimTranscript = ''
-
             for (let i = event.resultIndex; i < event.results.length; ++i) {
                 if (event.results[i].isFinal) {
-                    // Basic heuristic: simple append. 
-                    // But `transcript` state updates might be async. 
-                    // Better to update based on what the API returns for THIS session.
+                    const newText = event.results[i][0].transcript.trim()
                     setTranscript(prev => {
-                        const newText = event.results[i][0].transcript.trim()
                         return prev ? `${prev} ${newText}` : newText
                     })
+
+                    // Trigger suggestion for this finalized sentence
+                    handleSuggestionTrigger(newText)
                 }
             }
         }
@@ -84,7 +123,7 @@ export function AudioRecorder() {
         recognitionRef.current = recognition
     }, [])
 
-    // To handle the "continuous" state properly with React state, 
+    // To handle the "continuous" state properly with React state,
     // we actually need to manage the start/stop carefully.
     // The 'onresult' above with 'continuous=true' will keep adding to event.results.
     // BUT, existing `transcript` state management might duplicate text if we are not careful.
@@ -95,6 +134,7 @@ export function AudioRecorder() {
 
     const startRecording = () => {
         setError(null)
+        setSuggestions([])
         if (recognitionRef.current) {
             try {
                 recognitionRef.current.start()
@@ -109,6 +149,7 @@ export function AudioRecorder() {
         if (recognitionRef.current) {
             recognitionRef.current.stop()
             setIsRecording(false)
+            setSuggestions([])
         }
     }
 
@@ -210,13 +251,53 @@ export function AudioRecorder() {
                     )}
 
                     {mode === 'recording' && (
-                        <Textarea
-                            value={transcript}
-                            onChange={(e) => setTranscript(e.target.value)}
-                            placeholder="Click Record and start speaking in Korean..."
-                            className="min-h-[400px] text-lg leading-relaxed p-6 resize-none focus-visible:ring-1"
-                            disabled={isProcessing}
-                        />
+                        <div className="relative">
+                            <Textarea
+                                value={transcript}
+                                onChange={(e) => setTranscript(e.target.value)}
+                                placeholder="Click Record and start speaking in Korean..."
+                                className="min-h-[400px] text-lg leading-relaxed p-6 resize-none focus-visible:ring-1 pb-20" // Extra padding for suggestions
+                                disabled={isProcessing}
+                            />
+
+                            {suggestions.length > 0 && (
+                                <div className="absolute bottom-4 left-4 right-4 bg-white/95 border shadow-lg rounded-lg p-3 backdrop-blur transition-all animate-in slide-in-from-bottom-2">
+                                    <div className="text-xs text-muted-foreground mb-2 flex items-center justify-between">
+                                        <span>Alternate Suggestions (Press 1-3 to replace last sentence)</span>
+                                        <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded text-slate-500">GPT-4o-mini</span>
+                                    </div>
+                                    <div className="flex flex-col gap-2">
+                                        {suggestions.map((sug, idx) => (
+                                            <button
+                                                key={idx}
+                                                onClick={() => {
+                                                    // Trigger keydown emulation or direct replace logic
+                                                    // DRY: Simplest to just copy logic? Or verify keydown handler works.
+                                                    // Just manual dispatch for now or copy replace logic.
+                                                    if (lastSentence) {
+                                                        setTranscript(prev => {
+                                                            const trimmedPrev = prev.trim()
+                                                            if (trimmedPrev.endsWith(lastSentence)) {
+                                                                return trimmedPrev.slice(0, -lastSentence.length) + sug
+                                                            }
+                                                            return prev
+                                                        })
+                                                        setSuggestions([])
+                                                        setLastSentence(null)
+                                                    }
+                                                }}
+                                                className="text-left text-sm p-2 hover:bg-slate-50 border rounded flex gap-2 items-center group"
+                                            >
+                                                <span className="bg-slate-200 text-slate-700 w-5 h-5 flex items-center justify-center rounded text-xs font-bold group-hover:bg-blue-600 group-hover:text-white transition-colors">
+                                                    {idx + 1}
+                                                </span>
+                                                <span className="flex-1">{sug}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     )}
 
                     {mode === 'correction' && correctionResult && (
