@@ -13,7 +13,13 @@ export async function transcribeAudio(formData: FormData) {
         throw new Error('No file provided')
     }
 
+    if (!process.env.OPENAI_API_KEY) {
+        console.error('Missing OPENAI_API_KEY')
+        return { error: 'Server misconfiguration: Missing API Key' }
+    }
+
     try {
+        // console.log('Transcribing file...', file.name, file.size) 
         const response = await openai.audio.transcriptions.create({
             file: file,
             model: 'whisper-large-v3-turbo',
